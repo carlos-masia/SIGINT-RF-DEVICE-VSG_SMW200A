@@ -2,7 +2,7 @@
 R&S SMW200A VSG control via RsSmw (VISA: HiSLIP or SOCKET).
 
 This module lives in SIGINT-RF-DEVICE-VSG_SMW200A (instrument layer).
-The SIGINT-RF-GUI project re-exports the same API through vsg_bridge.py (``from vsg_bridge import VsgSmw200a``).
+Import it directly: ``from vsg_smw200a import VsgSmw200a`` (after install or with this folder on ``PYTHONPATH``).
 
 **Configuration** is read from ``vsg_config.yaml`` next to this file, then overridden by
 environment variables (highest priority), then by explicit ``VsgSmw200a(...)`` keyword arguments.

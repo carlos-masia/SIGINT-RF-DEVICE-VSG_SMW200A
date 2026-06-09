@@ -2,23 +2,46 @@
 
 Python tools for the **Rohde & Schwarz SMW200A** vector signal generator (VSG) and related **SMW / FSW** SCPI-over-TCP workflows.
 
-## Contents
+## Repository layout
 
-| Location | Role |
-|----------|------|
-| `SIGINT-RF-DEVICE-VSG_SMW200A/SIGINT-RF-DEVICE-VSG_SMW200A/vsg_config.yaml` | **Defaults** for `VsgSmw200a` (IP, transport, port, optional `smw_visa`). Overridden by `SMW_*` env vars. Alternate path: `VSG_CONFIG_PATH`. |
-| `SIGINT-RF-DEVICE-VSG_SMW200A/SIGINT-RF-DEVICE-VSG_SMW200A/vsg_smw200a.py` | **Instrument layer:** thin `RsSmw` wrapper (`VsgSmw200a`), HiSLIP or SCPI socket, `open` / `close`, access to `.smw` for full driver API. |
-| `SIGINT-RF-DEVICE-VSG_SMW200A/SIGINT-RF-DEVICE-VSG_SMW200A/smw200a_arb_signals.py` | **ARB catalog:** builds I/Q, writes `.wv`, uploads to the SMW ARB path, optional FSW spectrum alignment; includes a Tk catalog GUI (`--gui`). |
-| `rs_smw_fsw_tcp.py` (repository root, next to `pyproject.toml`) | **SCPI/TCP GUI:** band presets, CW setup, FSW spectrum; Tk UI. Uses the same SCPI helpers as the ARB script. |
+```text
+SIGINT-RF-DEVICE-VSG_SMW200A/          ← repo root (pyproject.toml, .venv)
+  SIGINT-RF-DEVICE-VSG_SMW200A/        ← installable Python sources
+    vsg_smw200a.py                     ← VsgSmw200a: RsSmw wrapper (VISA connection)
+    vsg_config.yaml                    ← instrument defaults (IP, transport, port)
+    rs_scpi_tcp/                       ← SCPI-over-TCP package (stdlib only)
+      __init__.py                      ← re-exports ScpiTcp, smw_query_idn, …
+      rs_scpi_tcp.py                   ← implementation
+    arb_catalog.yaml                   ← ARB signal catalog (carrier, power, gen, …)
+  code_snippets/
+    smw200a_tkinter_gui.py             ← legacy Tk ARB catalog GUI (archive / reference)
+```
 
-The **GUI** project (`SIGINT-RF-GUI`) imports `vsg_smw200a.py` indirectly via `vsg_bridge.py` so this folder remains the single source of truth for hardware control.
+## What each file does
+
+| File | Role |
+|------|------|
+| `vsg_smw200a.py` | **High-level driver.** Thin `RsSmw` wrapper (`VsgSmw200a`). Reads `vsg_config.yaml` / env vars for VISA address. Use this for ARB upload, RF on/off, full instrument API. |
+| `vsg_config.yaml` | **Instrument defaults:** `smw_ip`, `smw_transport` (`hislip` / `socket`), `smw_socket_port`, optional `smw_visa`, optional `fsw_ip` / `fsw43_ip`. Override with `SMW_*` env vars or `VSG_CONFIG_PATH`. |
+| `rs_scpi_tcp/` | **Low-level raw TCP SCPI** (stdlib only, no VISA). `ScpiTcp` class + helpers: `smw_query_idn` (quick `*IDN?`), `smw_set_cw`, `fsw_configure_spectrum`, `fsw_bw_summary`. Used by the Shiny GUI **Test SMW** button and any FSW tuning. |
+| `arb_catalog.yaml` | **Signal catalog config.** 23 entries (VHF → Ka), each with `gen`, `carrier_mhz`, `power_dbm`, `description`, `trial_native`. Edit here to add / change signals without touching Python code. |
+| `code_snippets/smw200a_tkinter_gui.py` | Legacy Tk ARB catalog GUI (original all-in-one script). Kept as reference — **not the primary entry point**. Has a `sys.path` bootstrap to find `rs_scpi_tcp` and `vsg_smw200a` from the inner folder. |
+
+## `vsg_smw200a` vs `rs_scpi_tcp` — when to use each
+
+| Task | Use |
+|------|-----|
+| Upload `.wv` waveform, set RF freq / power, control ARB | `vsg_smw200a` (RsSmw, requires VISA) |
+| Quick `*IDN?` to verify the instrument is reachable | `rs_scpi_tcp.smw_query_idn` |
+| Configure FSW spectrum (center, span, RBW) | `rs_scpi_tcp.fsw_configure_spectrum` |
+| Set a CW without the full driver | `rs_scpi_tcp.smw_set_cw` |
+| No VISA stack on the PC | `rs_scpi_tcp` only |
 
 ## Requirements
 
-- **Python** ≥ 3.10 (`requires-python` in `pyproject.toml`).
-- **RsSmw** (R&S Python driver) and a **VISA** runtime (R&S VISA or NI-VISA) for HiSLIP / SOCKET.
-- **NumPy** (ARB generation and samples).
-- **PyYAML** (read `vsg_config.yaml` for `VsgSmw200a` defaults).
+- **Python** ≥ 3.14.5 (see `pyproject.toml`).
+- **RsSmw** + a **VISA** runtime (R&S VISA or NI-VISA) — only for `vsg_smw200a`.
+- **NumPy** and **PyYAML** — for the ARB scripts (`smw200a_arb_signals.py` in the Shiny GUI repo).
 
 Install from the repository root:
 
@@ -27,51 +50,48 @@ cd SIGINT-RF-DEVICE-VSG_SMW200A
 pip install -e .
 ```
 
-Or install dependencies only:
-
-```powershell
-pip install -r SIGINT-RF-DEVICE-VSG_SMW200A\requirements.txt
-```
-
-### `rs_scpi_tcp` module
-
-`smw200a_arb_signals.py` and `rs_smw_fsw_tcp.py` import **`rs_scpi_tcp`** (SCPI over TCP helpers). That file must be available on **PYTHONPATH** next to those scripts (same layout you use today). It is not published on PyPI in this snapshot—add or vendor `rs_scpi_tcp.py` in your checkout if it is missing.
+After install, `import rs_scpi_tcp` and `import vsg_smw200a` work in any script running in that venv.
 
 ## Quick usage
 
-### VSG session (`vsg_smw200a.py`)
+### Connection test (`vsg_smw200a.py`)
 
 ```powershell
 cd SIGINT-RF-DEVICE-VSG_SMW200A\SIGINT-RF-DEVICE-VSG_SMW200A
-# No CLI args: reads vsg_config.yaml (next to this script), then SMW_* env overrides
 python vsg_smw200a.py
 ```
 
-Configuration resolution for each field (highest priority first): **explicit `VsgSmw200a(...)` kwargs** → **`SMW_*` environment variables** → **`vsg_config.yaml`** → **built-in constants** in `vsg_smw200a.py`.
+Config resolution (highest priority first): explicit `VsgSmw200a(...)` kwargs → `SMW_*` env vars → `vsg_config.yaml` → built-in defaults.
 
-YAML keys (see `vsg_config.yaml`): `smw_ip`, `smw_transport` (`hislip` or `socket`), `smw_socket_port`, optional `smw_visa` (full VISA resource). Set **`VSG_CONFIG_PATH`** to point at an alternate YAML file.
+### Raw TCP `*IDN?` (no VISA needed)
 
-### ARB catalog (`smw200a_arb_signals.py`)
-
-```powershell
-python smw200a_arb_signals.py --list
-python smw200a_arb_signals.py --gui
-python smw200a_arb_signals.py --signal ais --smw-ip 192.168.1.10
+```python
+from rs_scpi_tcp import smw_query_idn
+print(smw_query_idn("192.168.1.10"))
 ```
 
-See the module docstring for licensing notes (permanent ARB path vs trials) and **RF safety** (shielded bench only).
+### Shiny ARB catalog GUI
 
-### SMW / FSW TCP tool (`rs_smw_fsw_tcp.py`)
+Lives in the sibling repo **`SIGINT-RF-GUI`**. `vsg_gui.py` loads `smw200a_arb_signals.py` from that repo and uses `rs_scpi_tcp` and `vsg_smw200a` from here.
 
 ```powershell
-cd SIGINT-RF-DEVICE-VSG_SMW200A
-python rs_smw_fsw_tcp.py --smw-ip 192.168.1.10 --fsw-ip 192.168.1.11 --idn-only
-python rs_smw_fsw_tcp.py --gui
+cd ..\SIGINT-RF-GUI
+pip install -e .           # also installs this device package as a dependency
+sigint-rf-gui-shiny
+```
+
+### Legacy Tk GUI (code_snippets)
+
+```powershell
+cd SIGINT-RF-DEVICE-VSG_SMW200A        # repo root
+python .\code_snippets\smw200a_tkinter_gui.py --gui
 ```
 
 ## Packaging notes
 
-`pyproject.toml` declares runtime dependencies and, for setuptools, exposes `rs_smw_fsw_tcp` as a root-level module when the project is installed. Inner-folder scripts are typically run as files or with `PYTHONPATH` pointing at `SIGINT-RF-DEVICE-VSG_SMW200A/SIGINT-RF-DEVICE-VSG_SMW200A/`.
+`pyproject.toml` maps setuptools `package-dir` to `SIGINT-RF-DEVICE-VSG_SMW200A/` and exposes:
+- **package** `rs_scpi_tcp` (folder with `__init__.py`)
+- **flat modules** `vsg_smw200a`, `rs_smw_fsw_tcp`, `smw200a_arb_signals`, `vsg_tk_smoke`
 
 ## Development extras
 

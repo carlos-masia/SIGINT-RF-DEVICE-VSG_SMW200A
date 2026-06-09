@@ -26,9 +26,11 @@ the SMW; this script still uses **ARB LFM** for ``radar_*`` (no PS SCPI wired he
 raising ARB sample rate (e.g. very wide chirps at X/Ka).
 
 Requirements:
-    pip install RsSmw numpy
-    If you see "No module named 'RsSmw'", run the same command with the Python you use for the GUI.
-    (RsSmw uses VISA; for SOCKET without VISA, see --instr-addr / DEFAULT_INSTR_ADDR.)
+    pip install RsSmw numpy PyYAML
+    This script uses ``vsg_config.yaml`` in the **same directory as this file** (unless you
+    set ``VSG_CONFIG_PATH`` to another file). Same keys as ``vsg_smw200a``: ``smw_ip``,
+    ``smw_transport``, ``smw_socket_port``, ``smw_visa``. Optional FSW: ``fsw_ip`` or ``fsw43_ip``.
+    Environment overrides: ``SMW_VISA``, ``SMW_IP``, ``SMW_TRANSPORT``, ``SMW_SOCKET_PORT``.
 
     FSW43 spectrum alignment uses the same SCPI-over-TCP code as rs_smw_fsw_tcp.py
     (``rs_scpi_tcp.py``, stdlib only): pass ``--fsw-ip`` to set spectrum center to the
@@ -39,6 +41,7 @@ Quick usage:
     python smw200a_arb_signals.py --list --license-detail
     python smw200a_arb_signals.py --gui
     python smw200a_arb_signals.py --signal ais
+    python smw200a_arb_signals.py --signal ais   # SMW/FSW from vsg_config.yaml when keys set
     python smw200a_arb_signals.py --signal ais --smw-ip 192.168.1.10 --fsw-ip 192.168.1.11
     python smw200a_arb_signals.py --signal radar_x --dry-run   # only creates .wv
 
@@ -59,36 +62,101 @@ import inspect
 import os
 import sys
 import threading
+from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional
+
+# This file lives in code_snippets/; device modules (rs_scpi_tcp, vsg_smw200a) are in
+# the sibling SIGINT-RF-DEVICE-VSG_SMW200A/ inner folder — add it to sys.path first.
+_device_inner = Path(__file__).resolve().parent.parent / "SIGINT-RF-DEVICE-VSG_SMW200A"
+if str(_device_inner) not in sys.path:
+    sys.path.insert(0, str(_device_inner))
+
+# Use vsg_config.yaml from the inner folder (where vsg_smw200a.py lives).
+_VSG_YAML = _device_inner / "vsg_config.yaml"
+if _VSG_YAML.is_file() and not os.environ.get("VSG_CONFIG_PATH", "").strip():
+    os.environ["VSG_CONFIG_PATH"] = str(_VSG_YAML)
 
 import numpy as np
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
 from rs_scpi_tcp import ScpiTcp, fsw_bw_summary, fsw_configure_spectrum
+from vsg_smw200a import (
+    VsgSmw200a,
+    build_visa_resource,
+    config_file_path,
+    default_smw_ip,
+    default_socket_port,
+    default_transport,
+    default_visa_from_config,
+    default_visa_from_env,
+    is_rs_smw_installed,
+)
 
 # ----------------------------------------------------------------------------
-# Instrument connection (RsSmw / VISA)
+# Instrument connection (vsg_config.yaml + env, same as vsg_smw200a.VsgSmw200a)
 # ----------------------------------------------------------------------------
-# HiSLIP (with VISA):     'TCPIP::192.168.0.10::HISLIP'
-# Socket (no VISA):      'TCPIP::192.168.0.10::5025::SOCKET'  (options='SelectVisa=SocketIo')
-DEFAULT_INSTR_ADDR = "TCPIP::192.168.0.10::HISLIP"
+# HiSLIP:  TCPIP::<ip>::HISLIP   |  Socket:  TCPIP::<ip>::<port>::SOCKET
 
 # Working paths on PC and instrument
 PC_WV = r"./_tmp_signal.wv"
 INSTR_WV = "/var/user/arb_signal.wv"
 
 
+def _read_vsg_config_mapping() -> dict[str, Any]:
+    """Load ``vsg_config.yaml`` for optional keys (FSW defaults) not exposed on vsg_smw200a."""
+    path = config_file_path()
+    if not path.is_file():
+        return {}
+    try:
+        import yaml
+    except ImportError:
+        return {}
+    try:
+        with path.open(encoding="utf-8") as f:
+            raw = yaml.safe_load(f)
+    except OSError:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _fsw_ip_from_vsg_yaml() -> str | None:
+    for key in ("fsw_ip", "fsw43_ip"):
+        v = _read_vsg_config_mapping().get(key)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return None
+
+
 def resolve_instr_addr(instr_addr: str | None, smw_ip: str | None) -> str:
-    """Pick VISA resource: explicit --instr-addr, then --smw-ip, then SMW_VISA env, then default."""
-    if instr_addr:
+    """
+    VISA resource string for the SMW.
+
+    Config file: ``VSG_CONFIG_PATH`` if set, else ``vsg_config.yaml`` next to this script.
+
+    Priority: explicit ``instr_addr``, then ``smw_ip`` (with ``smw_transport`` / ``smw_socket_port``
+    from YAML or env), then ``SMW_VISA``, then YAML ``smw_visa``, then YAML ``smw_ip`` + transport
+    (same resolution order as ``vsg_smw200a.VsgSmw200a``).
+    """
+    if instr_addr and instr_addr.strip():
         return instr_addr.strip()
     if smw_ip and smw_ip.strip():
-        return f"TCPIP::{smw_ip.strip()}::HISLIP"
-    env = os.environ.get("SMW_VISA", "").strip()
-    if env:
-        return env
-    return DEFAULT_INSTR_ADDR
+        return build_visa_resource(
+            ip=smw_ip.strip(),
+            transport=default_transport(),
+            socket_port=default_socket_port(),
+        )
+    env_visa = default_visa_from_env()
+    if env_visa:
+        return env_visa
+    cfg_visa = default_visa_from_config()
+    if cfg_visa:
+        return cfg_visa
+    return build_visa_resource(
+        ip=None,
+        transport=default_transport(),
+        socket_port=default_socket_port(),
+    )
 
 
 def estimate_fsw_span_hz(fs: float) -> float:
@@ -674,34 +742,6 @@ CATALOG["ttc_sband"] = CatalogEntry(
 )
 
 
-def is_rs_smw_installed() -> bool:
-    """True if the Rohde & Schwarz RsSmw driver package is importable."""
-    try:
-        import RsSmw  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
-
-
-def import_rs_smw_class():
-    """
-    Return the RsSmw class. Raises RuntimeError with install instructions if missing.
-    """
-    try:
-        from RsSmw import RsSmw
-
-        return RsSmw
-    except ImportError as e:
-        raise RuntimeError(
-            "Falta el paquete Python 'RsSmw' (driver Rohde & Schwarz para el SMW).\n\n"
-            "Instalalo con el MISMO Python que usás para esta ventana, por ejemplo:\n"
-            "  pip install RsSmw\n\n"
-            "También necesitás VISA en el PC (p. ej. R&S VISA o NI-VISA) para HiSLIP/SOCKET.\n"
-            f"Error original: {e}"
-        ) from e
-
-
 # ============================================================================
 #  Playback on SMW200A
 # ============================================================================
@@ -748,31 +788,28 @@ def play(
             f"RLEV {ref:.1f} dBm @ {fsw_ip.strip()}:{fsw_port}"
         )
 
-    RsSmw = import_rs_smw_class()
-    RsSmw.assert_minimum_version("5.0.44")
-    smw = RsSmw(addr)
-    emit(f"IDN: {smw.utilities.idn_string}")
+    with VsgSmw200a(visa_resource=addr) as vsg:
+        smw = vsg.smw
+        emit(f"IDN: {smw.utilities.idn_string}")
 
-    smw.arb_files.create_waveform_file_from_samples(
-        i_data,
-        q_data,
-        PC_WV,
-        clock_freq=fs,
-        auto_scale=True,
-        comment=f"{name}: {desc}",
-    )
-    if dry_run:
-        emit(f".wv written to {PC_WV} (dry-run, not sent to instrument).")
-        smw.close()
-    else:
-        smw.arb_files.send_waveform_file_to_instrument(PC_WV, INSTR_WV)
-        smw.source.bb.arbitrary.waveform.set_select(INSTR_WV)
-        smw.source.bb.arbitrary.set_state(True)
-        smw.source.frequency.set_frequency(freq)
-        smw.source.power.level.immediate.set_amplitude(power)
-        smw.output.state.set_value(True)
-        emit("RF ON. Use conducted/shielded setup only (see script security notice).")
-        smw.close()
+        smw.arb_files.create_waveform_file_from_samples(
+            i_data,
+            q_data,
+            PC_WV,
+            clock_freq=fs,
+            auto_scale=True,
+            comment=f"{name}: {desc}",
+        )
+        if dry_run:
+            emit(f".wv written to {PC_WV} (dry-run, not sent to instrument).")
+        else:
+            smw.arb_files.send_waveform_file_to_instrument(PC_WV, INSTR_WV)
+            smw.source.bb.arbitrary.waveform.set_select(INSTR_WV)
+            smw.source.bb.arbitrary.set_state(True)
+            smw.source.frequency.set_frequency(freq)
+            smw.source.power.level.immediate.set_amplitude(power)
+            smw.output.state.set_value(True)
+            emit("RF ON. Use conducted/shielded setup only (see script security notice).")
 
     if fsw_ip and fsw_ip.strip():
         try:
@@ -796,14 +833,14 @@ def play(
 #  Tkinter GUI (also opened from rs_smw_fsw_tcp.py)
 # ============================================================================
 class ArbSignalsGuiApp:
-    """Pick catalog waveform, apply to SMW (RsSmw), optionally tune FSW (SCPI TCP)."""
+    """Pick catalog waveform, apply to SMW via VsgSmw200a / YAML, optionally tune FSW (SCPI TCP)."""
 
     def __init__(
         self,
         master: tk.Misc,
         *,
-        smw_ip: str = "",
-        fsw_ip: str = "",
+        smw_ip: str | None = None,
+        fsw_ip: str | None = None,
         fsw_port: int = 5025,
         fsw_timeout: float = 15.0,
     ) -> None:
@@ -824,7 +861,7 @@ class ArbSignalsGuiApp:
                 text=(
                     "RsSmw no está instalado: no se puede generar el .wv ni controlar el SMW hasta instalarlo.\n"
                     "Abrí una consola y ejecutá:  pip install RsSmw\n"
-                    "(usá el mismo Python con el que abrís esta aplicación.)"
+                    "(vsg_smw200a / vsg_config.yaml usan el mismo driver; mismo Python que esta app.)"
                 ),
                 foreground="#b00000",
                 wraplength=640,
@@ -840,13 +877,15 @@ class ArbSignalsGuiApp:
         ttk.Label(conn, text="VISA override (optional):").grid(row=0, column=0, sticky="w")
         self.ent_instr = ttk.Entry(conn, width=48)
         self.ent_instr.grid(row=0, column=1, sticky="ew", padx=(4, 0))
-        ttk.Label(conn, text="SMW IP (HiSLIP):").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(conn, text="SMW IP (HiSLIP/socket desde YAML si vacío):").grid(row=1, column=0, sticky="w", pady=(4, 0))
         self.ent_smw_ip = ttk.Entry(conn, width=20)
-        self.ent_smw_ip.insert(0, smw_ip)
+        smw_guess = default_smw_ip(None) if not (smw_ip or "").strip() else str(smw_ip).strip()
+        self.ent_smw_ip.insert(0, smw_guess)
         self.ent_smw_ip.grid(row=1, column=1, sticky="w", padx=(4, 0), pady=(4, 0))
         ttk.Label(conn, text="FSW IP:").grid(row=2, column=0, sticky="w", pady=(4, 0))
         self.ent_fsw_ip = ttk.Entry(conn, width=20)
-        self.ent_fsw_ip.insert(0, fsw_ip)
+        fsw_guess = (_fsw_ip_from_vsg_yaml() or "") if not (fsw_ip or "").strip() else str(fsw_ip).strip()
+        self.ent_fsw_ip.insert(0, fsw_guess)
         self.ent_fsw_ip.grid(row=2, column=1, sticky="w", padx=(4, 0), pady=(4, 0))
         ttk.Label(conn, text="FSW port:").grid(row=2, column=2, sticky="e", padx=(16, 4), pady=(4, 0))
         self.ent_fsw_port = ttk.Entry(conn, width=8)
@@ -990,13 +1029,7 @@ class ArbSignalsGuiApp:
             messagebox.showwarning("Signal", "Select a catalog signal from the list.")
             return
         instr_override = self.ent_instr.get().strip() or None
-        smw_ip = self.ent_smw_ip.get().strip()
-        if not smw_ip and not instr_override:
-            messagebox.showwarning(
-                "SMW",
-                "Enter SMW IP (for TCPIP::<ip>::HISLIP) or a full VISA string in VISA override.",
-            )
-            return
+        smw_ip = self.ent_smw_ip.get().strip() or None
         try:
             fsw_port = int(self.ent_fsw_port.get().strip())
             fsw_ch = int(self.ent_fsw_ch.get().strip())
@@ -1006,7 +1039,7 @@ class ArbSignalsGuiApp:
         fsw_ip = self.ent_fsw_ip.get().strip() or None
         fsw_span = self._parse_opt_float(self.ent_fsw_span.get())
         fsw_ref = self._parse_opt_float(self.ent_fsw_ref.get())
-        addr = resolve_instr_addr(instr_override, smw_ip or None)
+        addr = resolve_instr_addr(instr_override, smw_ip)
 
         try:
             gen_kwargs = self._collect_gen_kwargs_from_gui()
@@ -1043,8 +1076,8 @@ class ArbSignalsGuiApp:
 def open_arb_signals_gui(
     parent: tk.Misc,
     *,
-    smw_ip: str = "",
-    fsw_ip: str = "",
+    smw_ip: str | None = None,
+    fsw_ip: str | None = None,
     fsw_port: int = 5025,
     fsw_timeout: float = 15.0,
 ) -> tk.Toplevel:
@@ -1088,7 +1121,9 @@ def run_arb_gui_standalone() -> int:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(description="ARB waveform generator for R&S SMW200A (RsSmw).")
+    ap = argparse.ArgumentParser(
+        description="ARB waveform generator for R&S SMW200A (VsgSmw200a; vsg_config.yaml + env)."
+    )
     ap.add_argument("--signal", help="Catalog entry name (see --list).")
     ap.add_argument("--list", action="store_true", help="List catalog entries and exit.")
     ap.add_argument(
@@ -1110,19 +1145,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--instr-addr",
         default=None,
         metavar="VISA",
-        help="Full VISA resource string (overrides --smw-ip and SMW_VISA).",
+        help="Full VISA resource string (overrides --smw-ip and YAML/env SMW resolution).",
     )
     ap.add_argument(
         "--smw-ip",
         default=None,
         metavar="IP",
-        help="SMW IP; builds TCPIP::<IP>::HISLIP unless --instr-addr is set.",
+        help="SMW IP; resource built with smw_transport / smw_socket_port from vsg_config.yaml (or env). "
+        "If omitted with no --instr-addr, uses YAML smw_visa or smw_ip (same as vsg_smw200a).",
     )
     ap.add_argument(
         "--fsw-ip",
         default=None,
         metavar="IP",
-        help="FSW43 IP (SCPI TCP). Spectrum center = catalog RF, span from ARB clock (see --fsw-span-hz).",
+        help="FSW43 IP (SCPI TCP). If omitted, uses fsw_ip or fsw43_ip from vsg_config.yaml when set.",
     )
     ap.add_argument("--fsw-port", type=int, default=5025, help="FSW SCPI TCP port (default 5025).")
     ap.add_argument("--fsw-timeout", type=float, default=15.0, help="FSW socket timeout in seconds.")
@@ -1150,6 +1186,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.gui:
         return run_arb_gui_standalone()
     instr = resolve_instr_addr(args.instr_addr, args.smw_ip)
+    fsw_ip_eff = (args.fsw_ip or "").strip() or _fsw_ip_from_vsg_yaml()
 
     if args.list or not args.signal:
         print("Available signals (this script -> permanent ARB I/Q [P], B9+K515+K527):")
@@ -1159,7 +1196,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"       {e.permanent_delivery}")
                 if e.trial_native:
                     print(f"       Nativo trial (no usado aqui): {e.trial_native}")
-        print(f"\nInstrument address in use: {instr}")
+        print(f"\nVSG config file: {config_file_path()}")
+        print(f"Instrument address in use: {instr}")
+        if fsw_ip_eff:
+            print(f"FSW IP (CLI or YAML): {fsw_ip_eff}")
         print("Tip: --license-detail for trial vs permanent notes; --fsw-ip aligns FSW43 spectrum.")
         return 0
 
@@ -1172,7 +1212,7 @@ def main(argv: list[str] | None = None) -> int:
             args.signal,
             dry_run=args.dry_run,
             instr_addr=instr,
-            fsw_ip=args.fsw_ip,
+            fsw_ip=fsw_ip_eff,
             fsw_port=args.fsw_port,
             fsw_timeout_s=args.fsw_timeout,
             fsw_span_hz=args.fsw_span_hz,

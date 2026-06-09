@@ -10,7 +10,7 @@ package-mode = false
 [project]
 name = "SIGINT-RF-DEVICE-VSG_SMW200A"
 version = "0.1.0"
-description = "R&S SMW200A ARB catalog (RsSmw), VSG driver (vsg_smw200a), and SMW/FSW SCPI-over-TCP GUI (rs_smw_fsw_tcp)."
+description = "R&S SMW200A ARB catalog (RsSmw), VSG driver (vsg_smw200a), SCPI/TCP helpers (rs_scpi_tcp), Tk tools (rs_smw_fsw_tcp, vsg_tk_smoke)."
 requires-python = ">=3.14.5"
 readme = "README.md"
 license = { text = "MIT" }
@@ -28,6 +28,9 @@ dependencies = [
     "PyYAML==6.0.1",
 ]
 
+[project.scripts]
+sigint-rf-vsg-tk = "vsg_tk_smoke:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest==7.4",
@@ -38,8 +41,17 @@ dev = [
 ]
 
 [tool.setuptools]
-# Repo root module; inner-folder scripts (smw200a_arb_signals, vsg_smw200a) are run as files or via PYTHONPATH.
-py-modules = ["rs_smw_fsw_tcp"]
+# rs_scpi_tcp is now a package (subfolder with __init__.py); the rest remain flat modules.
+packages = ["rs_scpi_tcp"]
+py-modules = [
+    "rs_smw_fsw_tcp",
+    "smw200a_arb_signals",
+    "vsg_smw200a",
+    "vsg_tk_smoke",
+]
+
+[tool.setuptools.package-dir]
+"" = "SIGINT-RF-DEVICE-VSG_SMW200A"
 
 [tool.black]
 line-length = 100

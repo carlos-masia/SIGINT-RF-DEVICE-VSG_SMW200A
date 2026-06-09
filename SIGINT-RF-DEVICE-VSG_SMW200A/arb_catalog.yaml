@@ -1,0 +1,187 @@
+# ARB signal catalog for smw200a_arb_signals.py
+#
+# Each entry is: gen, carrier_mhz, power_dbm, description, trial_native.
+# gen:          generator function name (registered in GEN_REGISTRY in the script).
+# gen_kwargs:   optional dict of keyword args fixed via functools.partial.
+# carrier_mhz:  RF carrier in MHz.
+# power_dbm:    output power in dBm (conducted / shielded bench only).
+# description:  short human-readable label.
+# trial_native: which native SMW option could replicate this while trials are active
+#               (informational; this script always uses the permanent ARB path).
+#
+# RF SAFETY: generate only in a shielded bench (cable + attenuator or screened chamber).
+# Never radiate distress/safety frequencies (EPIRB 406 MHz, ELT 121.5 MHz, ADS-B 1090 MHz,
+# maritime Ch16/Ch70, Mode S) outdoors.
+
+signals:
+
+  # ---------- VHF/UHF voice & data ----------
+  atc_am:
+    gen: gen_am_dsb
+    carrier_mhz: 118.0
+    power_dbm: -30
+    description: "ATC voice AM-DSB"
+    trial_native: "AM nativo K720 [T] (no usado aqui)"
+
+  maritime_fm:
+    gen: gen_fm
+    carrier_mhz: 156.8
+    power_dbm: -30
+    description: "Maritime voice FM (Ch16)"
+    trial_native: "FM nativo K720 [T] (no usado aqui)"
+
+  noaa_fm:
+    gen: gen_fm
+    carrier_mhz: 162.4
+    power_dbm: -30
+    description: "NOAA WX FM"
+    trial_native: "FM nativo K720 [T] (no usado aqui)"
+
+  gmrs_fm:
+    gen: gen_fm
+    carrier_mhz: 462.5625
+    power_dbm: -30
+    description: "GMRS FM"
+    trial_native: "FM nativo K720 [T] (no usado aqui)"
+
+  ais:
+    gen: gen_gmsk
+    carrier_mhz: 161.975
+    power_dbm: -40
+    description: "AIS GMSK"
+    trial_native: "Custom GMSK / ARB [P] - bits aleatorios (trama AIS real -> encoder externo)"
+
+  dsc:
+    gen: gen_fsk
+    carrier_mhz: 156.525
+    power_dbm: -40
+    description: "DSC Ch70 FSK"
+    trial_native: "Custom 2FSK / ARB [P]"
+
+  dmr:
+    gen: gen_4fsk
+    carrier_mhz: 466.0
+    power_dbm: -40
+    description: "DMR 4FSK"
+    trial_native: "Custom 4FSK / ARB [P] - vocoder real -> ARB externo"
+
+  p25:
+    gen: gen_4fsk
+    carrier_mhz: 460.0
+    power_dbm: -40
+    description: "P25 C4FM"
+    trial_native: "Custom 4FSK / ARB [P]"
+
+  tetra:
+    gen: gen_pi4_dqpsk
+    carrier_mhz: 392.0
+    power_dbm: -40
+    description: "TETRA pi/4-DQPSK"
+    trial_native: "Custom pi/4-DQPSK / ARB [P]"
+
+  # ---------- L-band ----------
+  uhf_satcom:
+    gen: gen_psk
+    carrier_mhz: 250.0
+    power_dbm: -50
+    description: "UHF SATCOM QPSK"
+    trial_native: "Custom PSK / ARB [P]"
+
+  adsb:
+    gen: gen_ppm_adsb
+    carrier_mhz: 1090.0
+    power_dbm: -50
+    description: "ADS-B 1090ES PPM (placeholder)"
+    trial_native: "ARB [P] - trama Mode S real (p.ej. pyModeS + CRC)"
+
+  gnss_l1:
+    gen: gen_psk
+    gen_kwargs:
+      order: 2
+    carrier_mhz: 1575.42
+    power_dbm: -60
+    description: "GNSS L1 BPSK (1 SV placeholder)"
+    trial_native: "Opciones GNSS K44/K66/K94/K107 [T]; ARB 1 SV limitado [P]"
+
+  # ---------- S-band ----------
+  ttc_sband:
+    gen: gen_psk
+    gen_kwargs:
+      order: 2
+    carrier_mhz: 2025.0
+    power_dbm: -40
+    description: "TT&C S-band BPSK"
+    trial_native: "Custom PCM/PSK / ARB [P]"
+
+  radar_s:
+    gen: gen_lfm_pulse
+    carrier_mhz: 3050.0
+    power_dbm: -20
+    description: "Maritime S-band radar LFM"
+    trial_native: "Pulse Sequencer K300/K301 [P] (nativo); K22 pulso [T]; aqui ARB LFM [P]"
+
+  ism_24:
+    gen: gen_multitone
+    carrier_mhz: 2440.0
+    power_dbm: -40
+    description: "ISM 2.4 GHz multitone (placeholder)"
+    trial_native: "WLAN/BT/Zigbee opciones [T] si las tuvieras; multitono ARB [P]"
+
+  # ---------- C-band ----------
+  datalink_c:
+    gen: gen_psk
+    carrier_mhz: 4700.0
+    power_dbm: -40
+    description: "C-band data link QPSK"
+    trial_native: "Custom / ARB [P]"
+
+  radar_c:
+    gen: gen_lfm_pulse
+    carrier_mhz: 5400.0
+    power_dbm: -20
+    description: "Airborne C-band radar LFM"
+    trial_native: "Pulse Sequencer K300/K301 [P] (nativo); aqui ARB LFM [P]"
+
+  satcom_c:
+    gen: gen_apsk16
+    carrier_mhz: 5850.0
+    power_dbm: -40
+    description: "SATCOM C-band 16APSK"
+    trial_native: "Constelacion 16APSK; framing DVB-S2/S2X real -> toolchain o WinIQSIM2 [P/T segun opciones]"
+
+  # ---------- X-band ----------
+  satcom_x:
+    gen: gen_psk
+    carrier_mhz: 8100.0
+    power_dbm: -40
+    description: "X-band satcom QPSK"
+    trial_native: "Custom / ARB [P]"
+
+  radar_x:
+    gen: gen_lfm_pulse
+    carrier_mhz: 9400.0
+    power_dbm: -20
+    description: "X-band radar LFM"
+    trial_native: "Pulse Sequencer K300/K301 [P] (nativo); B1044N BW I/Q a verificar; ARB LFM [P]"
+
+  # ---------- Ku/Ka-band ----------
+  ku_dl:
+    gen: gen_apsk16
+    carrier_mhz: 12200.0
+    power_dbm: -40
+    description: "Ku downlink 16APSK"
+    trial_native: "16APSK modulacion; BBFRAME/FEC DVB -> export ARB [P]"
+
+  ka_dl:
+    gen: gen_apsk16
+    carrier_mhz: 19500.0
+    power_dbm: -40
+    description: "Ka downlink 16APSK"
+    trial_native: "16APSK modulacion; BBFRAME/FEC DVB -> export ARB [P]"
+
+  ka_ul:
+    gen: gen_apsk16
+    carrier_mhz: 29500.0
+    power_dbm: -40
+    description: "Ka uplink 16APSK"
+    trial_native: "16APSK modulacion; BBFRAME/FEC DVB -> export ARB [P]"
