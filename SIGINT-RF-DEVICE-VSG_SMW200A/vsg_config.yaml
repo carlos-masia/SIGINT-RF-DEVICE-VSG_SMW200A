@@ -1,0 +1,10 @@
+# Defaults for VsgSmw200a (R&S SMW200A over RsSmw / VISA).
+# Override per machine or session with environment variables (they win over this file):
+#   SMW_VISA, SMW_IP, SMW_TRANSPORT, SMW_SOCKET_PORT
+
+smw_ip: "169.254.2.20" #"192.168.0.10"
+smw_transport: "hislip" # hislip | socket
+smw_socket_port: 5025
+
+# Optional: full VISA resource string. If non-empty, smw_ip / transport / port are ignored.
+# smw_visa: "TCPIP::192.168.0.10::HISLIP"

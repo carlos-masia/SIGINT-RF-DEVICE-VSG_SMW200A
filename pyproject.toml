@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# Poetry only installs dependencies here; there is no Python package folder named
+# sigint_rf_device_vsg_smw200a (scripts live under SIGINT-RF-DEVICE-VSG_SMW200A/).
+[tool.poetry]
+package-mode = false
+
+[project]
+name = "SIGINT-RF-DEVICE-VSG_SMW200A"
+version = "0.1.0"
+description = "R&S SMW200A ARB catalog (RsSmw), VSG driver (vsg_smw200a), and SMW/FSW SCPI-over-TCP GUI (rs_smw_fsw_tcp)."
+requires-python = ">=3.14.5"
+readme = "README.md"
+license = { text = "MIT" }
+keywords = ["smw200a", "vsg", "scpi", "rohde-schwarz", "sigint", "arb"]
+classifiers = [
+    "Programming Language :: Python :: 3.14",
+    "Private :: Do Not Upload",
+]
+
+# Runtime: smw200a_arb_signals.py, vsg_smw200a.py (numpy + RsSmw; tkinter is stdlib).
+# rs_smw_fsw_tcp.py is stdlib + tkinter only, but the ARB stack needs the same env.
+dependencies = [
+    "numpy==2.4.6",
+    "RsSmw==5.50.42",
+    "PyYAML==6.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==7.4",
+    "pytest-cov==4.1",
+    "black>=24.0",
+    "ruff==0.4",
+    "mypy==1.5",
+]
+
+[tool.setuptools]
+# Repo root module; inner-folder scripts (smw200a_arb_signals, vsg_smw200a) are run as files or via PYTHONPATH.
+py-modules = ["rs_smw_fsw_tcp"]
+
+[tool.black]
+line-length = 100
+target-version = ["py314"]
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+select = ["E", "F", "W"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.14"
+warn_return_any = true
+warn_unused_configs = true
