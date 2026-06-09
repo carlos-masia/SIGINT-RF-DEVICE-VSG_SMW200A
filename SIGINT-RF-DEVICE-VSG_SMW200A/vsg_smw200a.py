@@ -25,9 +25,13 @@ Requires: pip install RsSmw PyYAML (and a VISA stack on the PC for HiSLIP/SOCKET
 
 from __future__ import annotations
 
+import functools
+import inspect
 import os
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal, NamedTuple, Optional
+
+import numpy as np
 
 Transport = Literal["hislip", "socket"]
 
@@ -278,6 +282,391 @@ class VsgSmw200a:
         """Query *OPC? (1 when previous operations have completed)."""
         self.open()
         return int(float(self._drv.utilities.query_str("*OPC?").strip()))
+
+
+# ============================================================================
+# ARB waveform: file paths (PC temp + instrument destination)
+# ============================================================================
+
+PC_WV = r"./_tmp_signal.wv"
+INSTR_WV = "/var/user/arb_signal.wv"
+
+
+# ============================================================================
+# Config helpers: FSW IP from vsg_config.yaml
+# ============================================================================
+
+def _fsw_ip_from_vsg_yaml() -> str | None:
+    """Return ``fsw_ip`` / ``fsw43_ip`` from vsg_config.yaml, or None."""
+    cfg = _load_yaml_config()
+    for key in ("fsw_ip", "fsw43_ip"):
+        v = cfg.get(key)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return None
+
+
+def resolve_instr_addr(instr_addr: str | None, smw_ip: str | None) -> str:
+    """
+    Resolve the VISA resource string for the SMW200A.
+
+    Priority: explicit ``instr_addr`` > explicit ``smw_ip`` (with transport/port from
+    YAML/env) > ``SMW_VISA`` env var > YAML ``smw_visa`` > YAML ``smw_ip`` + transport.
+    """
+    if instr_addr and instr_addr.strip():
+        return instr_addr.strip()
+    if smw_ip and smw_ip.strip():
+        return build_visa_resource(
+            ip=smw_ip.strip(),
+            transport=default_transport(),
+            socket_port=default_socket_port(),
+        )
+    env_visa = default_visa_from_env()
+    if env_visa:
+        return env_visa
+    cfg_visa = default_visa_from_config()
+    if cfg_visa:
+        return cfg_visa
+    return build_visa_resource(ip=None, transport=default_transport(), socket_port=default_socket_port())
+
+
+# ============================================================================
+# FSW helpers
+# ============================================================================
+
+def estimate_fsw_span_hz(fs: float) -> float:
+    """Heuristic spectrum span (Hz) from ARB sample clock ``fs``."""
+    if fs <= 1e6:
+        return max(5e6, 25.0 * fs)
+    if fs <= 32e6:
+        return max(10e6, min(200e6, 6.0 * fs))
+    if fs <= 120e6:
+        return max(40e6, min(500e6, 4.0 * fs))
+    return min(600e6, max(100e6, 2.5 * fs))
+
+
+def default_fsw_ref_dbm(rf_power_dbm: float) -> float:
+    """Reference level above expected RF output (conducted / short cable)."""
+    return float(max(-30.0, min(40.0, rf_power_dbm + 55.0)))
+
+
+def tune_fsw43(
+    fsw_ip: str,
+    *,
+    port: int = 5025,
+    timeout_s: float = 15.0,
+    center_hz: float,
+    span_hz: float,
+    ref_dbm: float,
+    channel: int = 1,
+    rbw_hz: float | None = None,
+    vbw_hz: float | None = None,
+    log: Optional[Callable[[str], None]] = None,
+) -> None:
+    """Configure FSW spectrum to match the ARB carrier and estimated bandwidth."""
+    from rs_scpi_tcp import ScpiTcp, fsw_bw_summary, fsw_configure_spectrum
+
+    emit = log or print
+    ip = fsw_ip.strip()
+    if not ip:
+        return
+    rbw_auto = rbw_hz is None
+    vbw_auto = vbw_hz is None
+    with ScpiTcp(ip, port, timeout_s=timeout_s) as fsw:
+        idn = fsw.query("*IDN?")
+        emit(f"FSW IDN: {idn}")
+        fsw_configure_spectrum(
+            fsw,
+            center_hz=center_hz,
+            span_hz=span_hz,
+            ref_level_dbm=ref_dbm,
+            channel=channel,
+            rbw_hz=rbw_hz,
+            vbw_hz=vbw_hz,
+            rbw_auto=rbw_auto,
+            vbw_auto=vbw_auto,
+        )
+    bw = fsw_bw_summary(rbw_auto, vbw_auto, rbw_hz, vbw_hz)
+    emit(
+        f"FSW: center {center_hz / 1e9:.9f} GHz, span {span_hz / 1e6:.3f} MHz, "
+        f"RLEV {ref_dbm:.1f} dBm, ch={channel}, {bw}"
+    )
+
+
+# ============================================================================
+# DSP helpers and signal generators (dsptools sub-package)
+# ============================================================================
+
+from dsptools.filters import gaussian_pulse, normalize, random_bits, rrc_filter, shape_symbols
+from dsptools.signal_generator import (
+    gen_am_dsb,
+    gen_apsk16,
+    gen_awgn,
+    gen_barker_pulse,
+    gen_fsk,
+    gen_4fsk,
+    gen_fm,
+    gen_gmsk,
+    gen_lfm_pulse,
+    gen_multitone,
+    gen_pi4_dqpsk,
+    gen_ppm_adsb,
+    gen_psk,
+    gen_qam,
+)
+
+# Keep underscore aliases so existing internal references (e.g. CATALOG) stay unchanged.
+_normalize = normalize
+_rrc_filter = rrc_filter
+_gaussian_pulse = gaussian_pulse
+_random_bits = random_bits
+_shape_symbols = shape_symbols
+
+
+# ============================================================================
+# Catalog infrastructure
+# ============================================================================
+
+PERMANENT_ARB = "ARB I/Q (B9+K515+K527) [P]"
+
+
+class CatalogEntry(NamedTuple):
+    """Waveform row: generator, RF, level, description, and license routing hints."""
+
+    gen: Callable[..., tuple[Any, float]]
+    carrier_hz: float
+    power_dbm: float
+    description: str
+    permanent_delivery: str
+    trial_native: str
+
+
+class GenParamSpec(NamedTuple):
+    """One generator keyword argument exposed in the GUI."""
+
+    name: str
+    label: str
+    kind: str  # "float" | "int" | "tuple_float"
+    default: Any
+
+
+def _unwrap_partial_chain(f: Callable[..., Any]) -> tuple[Callable[..., Any], dict[str, Any]]:
+    """Return underlying function and merged keyword bindings from nested functools.partial."""
+    merged: dict[str, Any] = {}
+    cur: Any = f
+    while isinstance(cur, functools.partial):
+        if getattr(cur, "args", None) and len(cur.args) > 0:
+            raise ValueError("Generator partial() with positional args is not supported.")
+        merged = {**merged, **(cur.keywords or {})}
+        cur = cur.func
+    return cur, merged
+
+
+def _param_kind_from_default(val: Any) -> str:
+    if isinstance(val, tuple):
+        return "tuple_float"
+    if isinstance(val, bool):
+        return "float"
+    if isinstance(val, int):
+        return "int"
+    return "float"
+
+
+def _default_label(name: str) -> str:
+    pretty = {
+        "fs": "Sample rate fs (Hz)",
+        "tone": "Modulation tone (Hz)",
+        "depth": "AM depth (0..1)",
+        "dur": "Duration (s)",
+        "dev": "Peak FM deviation (Hz) / 4FSK spacing scale (Hz)",
+        "rb": "Symbol rate (bit/s for GMSK)",
+        "bt": "BT product (GMSK)",
+        "nbits": "Number of bits",
+        "rs": "Symbol rate (sym/s)",
+        "nsym": "Number of symbols",
+        "seed": "RNG seed",
+        "beta": "RRC roll-off",
+        "order": "Constellation order M",
+        "bw": "Chirp bandwidth (Hz)",
+        "pw": "Pulse width (s)",
+        "pri": "PRI / pulse repetition interval (s)",
+        "npulses": "Pulses in waveform",
+        "chip": "Barker chip width (s)",
+        "tones": "Tone offsets (Hz), comma-separated",
+        "devs": "FSK frequency deviations (Hz), comma-separated",
+    }
+    return pretty.get(name, name)
+
+
+def list_generator_param_specs(entry: CatalogEntry) -> list[GenParamSpec]:
+    """Parameters the user may edit (underlying signature minus partial-fixed names)."""
+    underlying, fixed_kw = _unwrap_partial_chain(entry.gen)
+    sig = inspect.signature(underlying)
+    out: list[GenParamSpec] = []
+    for pname, p in sig.parameters.items():
+        if pname in fixed_kw:
+            continue
+        if p.default is inspect.Parameter.empty:
+            continue
+        kind = _param_kind_from_default(p.default)
+        out.append(GenParamSpec(pname, _default_label(pname), kind, p.default))
+    return out
+
+
+def parse_gen_param_value(spec: GenParamSpec, text: str) -> Any:
+    """Parse a single GUI field into a Python value."""
+    t = text.strip()
+    if spec.kind == "tuple_float":
+        if not t:
+            return spec.default
+        parts = [p.strip() for p in t.split(",") if p.strip()]
+        return tuple(float(x) for x in parts)
+    if spec.kind == "int":
+        return int(float(t)) if t else spec.default
+    return float(t) if t else spec.default
+
+
+def format_gen_default_for_entry(spec: GenParamSpec) -> str:
+    """String to pre-fill a GUI field from the catalog default."""
+    v = spec.default
+    if spec.kind == "tuple_float":
+        return ",".join(str(float(x)) for x in v)
+    if spec.kind == "int":
+        return str(int(v))
+    return str(v)
+
+
+def build_gen_call_kwargs(entry: CatalogEntry, overrides: dict[str, Any]) -> dict[str, Any]:
+    """Build kwargs for entry.gen() respecting functools.partial bindings."""
+    underlying, fixed_kw = _unwrap_partial_chain(entry.gen)
+    sig = inspect.signature(underlying)
+    call_kw: dict[str, Any] = {}
+    for pname, p in sig.parameters.items():
+        if pname in fixed_kw:
+            continue
+        if pname in overrides:
+            call_kw[pname] = overrides[pname]
+        elif p.default is not inspect.Parameter.empty:
+            call_kw[pname] = p.default
+        else:
+            raise ValueError(f"Missing value for generator parameter {pname!r}")
+    return call_kw
+
+
+# ============================================================================
+# Catalog
+# ============================================================================
+
+CATALOG: dict[str, CatalogEntry] = {
+    "atc_am": CatalogEntry(gen_am_dsb, 118.000e6, -30, "ATC voice AM-DSB", PERMANENT_ARB, "AM nativo K720 [T] (no usado aqui)"),
+    "maritime_fm": CatalogEntry(gen_fm, 156.800e6, -30, "Maritime voice FM (Ch16)", PERMANENT_ARB, "FM nativo K720 [T] (no usado aqui)"),
+    "noaa_fm": CatalogEntry(gen_fm, 162.400e6, -30, "NOAA WX FM", PERMANENT_ARB, "FM nativo K720 [T] (no usado aqui)"),
+    "gmrs_fm": CatalogEntry(gen_fm, 462.5625e6, -30, "GMRS FM", PERMANENT_ARB, "FM nativo K720 [T] (no usado aqui)"),
+    "ais": CatalogEntry(gen_gmsk, 161.975e6, -40, "AIS GMSK", PERMANENT_ARB, "Custom GMSK / ARB [P] - bits aleatorios (trama AIS real -> encoder externo)"),
+    "dsc": CatalogEntry(gen_fsk, 156.525e6, -40, "DSC Ch70 FSK", PERMANENT_ARB, "Custom 2FSK / ARB [P]"),
+    "dmr": CatalogEntry(gen_4fsk, 466.000e6, -40, "DMR 4FSK", PERMANENT_ARB, "Custom 4FSK / ARB [P] - vocoder real -> ARB externo"),
+    "p25": CatalogEntry(gen_4fsk, 460.000e6, -40, "P25 C4FM", PERMANENT_ARB, "Custom 4FSK / ARB [P]"),
+    "tetra": CatalogEntry(gen_pi4_dqpsk, 392.000e6, -40, "TETRA pi/4-DQPSK", PERMANENT_ARB, "Custom pi/4-DQPSK / ARB [P]"),
+    "uhf_satcom": CatalogEntry(gen_psk, 250.000e6, -50, "UHF SATCOM QPSK", PERMANENT_ARB, "Custom PSK / ARB [P]"),
+    "adsb": CatalogEntry(gen_ppm_adsb, 1090.000e6, -50, "ADS-B 1090ES PPM (placeholder)", PERMANENT_ARB, "ARB [P] - trama Mode S real (p.ej. pyModeS + CRC)"),
+    "gnss_l1": CatalogEntry(functools.partial(gen_psk, order=2), 1575.420e6, -60, "GNSS L1 BPSK (1 SV placeholder)", PERMANENT_ARB, "Opciones GNSS K44/K66/K94/K107 [T]; ARB 1 SV limitado [P]"),
+    "ttc_sband": CatalogEntry(functools.partial(gen_psk, order=2), 2025.000e6, -40, "TT&C S-band BPSK", PERMANENT_ARB, "Custom PCM/PSK / ARB [P]"),
+    "radar_s": CatalogEntry(gen_lfm_pulse, 3050.000e6, -20, "Maritime S-band radar LFM", PERMANENT_ARB, "Pulse Sequencer K300/K301 [P] (nativo); K22 pulso [T]; aqui ARB LFM [P]"),
+    "ism_24": CatalogEntry(gen_multitone, 2440.000e6, -40, "ISM 2.4 GHz multitone (placeholder)", PERMANENT_ARB, "WLAN/BT/Zigbee opciones [T] si las tuvieras; multitono ARB [P]"),
+    "datalink_c": CatalogEntry(gen_psk, 4700.000e6, -40, "C-band data link QPSK", PERMANENT_ARB, "Custom / ARB [P]"),
+    "radar_c": CatalogEntry(gen_lfm_pulse, 5400.000e6, -20, "Airborne C-band radar LFM", PERMANENT_ARB, "Pulse Sequencer K300/K301 [P] (nativo); aqui ARB LFM [P]"),
+    "satcom_c": CatalogEntry(gen_apsk16, 5850.000e6, -40, "SATCOM C-band 16APSK", PERMANENT_ARB, "Constelacion 16APSK; framing DVB-S2/S2X real -> toolchain o WinIQSIM2 [P/T segun opciones]"),
+    "satcom_x": CatalogEntry(gen_psk, 8100.000e6, -40, "X-band satcom QPSK", PERMANENT_ARB, "Custom / ARB [P]"),
+    "radar_x": CatalogEntry(gen_lfm_pulse, 9400.000e6, -20, "X-band radar LFM", PERMANENT_ARB, "Pulse Sequencer K300/K301 [P] (nativo); B1044N BW I/Q a verificar; ARB LFM [P]"),
+    "ku_dl": CatalogEntry(gen_apsk16, 12200.000e6, -40, "Ku downlink 16APSK", PERMANENT_ARB, "16APSK modulacion; BBFRAME/FEC DVB -> export ARB [P]"),
+    "ka_dl": CatalogEntry(gen_apsk16, 19500.000e6, -40, "Ka downlink 16APSK", PERMANENT_ARB, "16APSK modulacion; BBFRAME/FEC DVB -> export ARB [P]"),
+    "ka_ul": CatalogEntry(gen_apsk16, 29500.000e6, -40, "Ka uplink 16APSK", PERMANENT_ARB, "16APSK modulacion; BBFRAME/FEC DVB -> export ARB [P]"),
+}
+
+
+# ============================================================================
+# Playback on SMW200A
+# ============================================================================
+
+def play(
+    name: str,
+    dry_run: bool = False,
+    instr_addr: str | None = None,
+    *,
+    carrier_hz: float | None = None,
+    power_dbm: float | None = None,
+    gen_kwargs: dict[str, Any] | None = None,
+    fsw_ip: str | None = None,
+    fsw_port: int = 5025,
+    fsw_timeout_s: float = 15.0,
+    fsw_span_hz: float | None = None,
+    fsw_ref_dbm: float | None = None,
+    fsw_ch: int = 1,
+    fsw_rbw_hz: float | None = None,
+    fsw_vbw_hz: float | None = None,
+    log: Optional[Callable[[str], None]] = None,
+) -> None:
+    """Generate I/Q, write .wv, upload to SMW200A, set carrier/power, optionally tune FSW."""
+    emit = log or print
+    e = CATALOG[name]
+    call_kw = build_gen_call_kwargs(e, gen_kwargs or {})
+    iq, fs = e.gen(**call_kw)
+    freq = float(e.carrier_hz if carrier_hz is None else carrier_hz)
+    power = float(e.power_dbm if power_dbm is None else power_dbm)
+    addr = instr_addr or resolve_instr_addr(None, None)
+    span = fsw_span_hz if fsw_span_hz is not None else estimate_fsw_span_hz(fs)
+    ref = fsw_ref_dbm if fsw_ref_dbm is not None else default_fsw_ref_dbm(power)
+
+    emit(f"[{name}] generator kwargs: {call_kw}")
+    emit(
+        f"[{name}] {e.description} | fs={fs / 1e6:.3f} MS/s | N={len(iq)} "
+        f"| RF={freq / 1e6:.3f} MHz | {power} dBm | {e.permanent_delivery}"
+    )
+    emit(f"VISA: {addr}")
+    if fsw_ip and fsw_ip.strip():
+        emit(
+            f"FSW (planned): center {freq / 1e9:.9f} GHz, span {span / 1e6:.3f} MHz, "
+            f"RLEV {ref:.1f} dBm @ {fsw_ip.strip()}:{fsw_port}"
+        )
+
+    i_data = np.real(iq).astype(float)
+    q_data = np.imag(iq).astype(float)
+
+    with VsgSmw200a(visa_resource=addr) as vsg:
+        smw = vsg.smw
+        emit(f"IDN: {smw.utilities.idn_string}")
+        smw.arb_files.create_waveform_file_from_samples(
+            i_data, q_data, PC_WV,
+            clock_freq=fs, auto_scale=True,
+            comment=f"{name}: {e.description}",
+        )
+        if dry_run:
+            emit(f".wv written to {PC_WV} (dry-run, not sent to instrument).")
+        else:
+            smw.arb_files.send_waveform_file_to_instrument(PC_WV, INSTR_WV)
+            smw.source.bb.arbitrary.waveform.set_select(INSTR_WV)
+            smw.source.bb.arbitrary.set_state(True)
+            smw.source.frequency.set_frequency(freq)
+            smw.source.power.level.immediate.set_amplitude(power)
+            smw.output.state.set_value(True)
+            emit("RF ON. Use conducted/shielded setup only.")
+
+    if fsw_ip and fsw_ip.strip():
+        try:
+            tune_fsw43(
+                fsw_ip,
+                port=fsw_port,
+                timeout_s=fsw_timeout_s,
+                center_hz=freq,
+                span_hz=span,
+                ref_dbm=ref,
+                channel=fsw_ch,
+                rbw_hz=fsw_rbw_hz,
+                vbw_hz=fsw_vbw_hz,
+                log=emit,
+            )
+        except OSError as exc:
+            emit(f"FSW: could not connect or configure ({fsw_ip.strip()}:{fsw_port}): {exc}")
 
 
 if __name__ == "__main__":

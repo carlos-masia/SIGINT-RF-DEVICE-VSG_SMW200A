@@ -9,7 +9,7 @@ package-mode = false
 
 [project]
 name = "SIGINT-RF-DEVICE-VSG_SMW200A"
-version = "0.1.0"
+version = "0.1.2"
 description = "R&S SMW200A ARB catalog (RsSmw), VSG driver (vsg_smw200a), SCPI/TCP helpers (rs_scpi_tcp), Tk tools (rs_smw_fsw_tcp, vsg_tk_smoke)."
 requires-python = ">=3.14.5"
 readme = "README.md"
@@ -41,11 +41,10 @@ dev = [
 ]
 
 [tool.setuptools]
-# rs_scpi_tcp is now a package (subfolder with __init__.py); the rest remain flat modules.
-packages = ["rs_scpi_tcp"]
+# rs_scpi_tcp and dsptools are packages (subfolders with __init__.py); the rest remain flat modules.
+packages = ["rs_scpi_tcp", "dsptools"]
 py-modules = [
     "rs_smw_fsw_tcp",
-    "smw200a_arb_signals",
     "vsg_smw200a",
     "vsg_tk_smoke",
 ]
