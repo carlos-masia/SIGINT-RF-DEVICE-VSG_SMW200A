@@ -4,3 +4,4 @@ __pycache__/
 *.pyo
 *.egg-info/
 SIGINT-RF-DEVICE-VSG_SMW200A/generate_arb_file/output/arb_signals.wv
+SIGINT-RF-DEVICE-VSG_SMW200A/generate_arb_file/output/arb_signals.png

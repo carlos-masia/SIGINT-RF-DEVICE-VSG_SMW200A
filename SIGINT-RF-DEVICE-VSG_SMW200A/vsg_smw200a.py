@@ -413,6 +413,8 @@ from dsptools.signal_generator import (
     gen_ppm_adsb,
     gen_psk,
     gen_qam,
+    gen_starlink_ku,
+    gen_vdes,
 )
 
 # Keep underscore aliases so existing internal references (e.g. CATALOG) stay unchanged.
@@ -564,6 +566,7 @@ CATALOG: dict[str, CatalogEntry] = {
     "gmrs_fm": CatalogEntry(gen_fm, 462.5625e6, -30, "GMRS FM", PERMANENT_ARB, "FM nativo K720 [T] (no usado aqui)"),
     "ais": CatalogEntry(gen_gmsk, 161.975e6, -40, "AIS GMSK", PERMANENT_ARB, "Custom GMSK / ARB [P] - bits aleatorios (trama AIS real -> encoder externo)"),
     "dsc": CatalogEntry(gen_fsk, 156.525e6, -40, "DSC Ch70 FSK", PERMANENT_ARB, "Custom 2FSK / ARB [P]"),
+    "vdes": CatalogEntry(gen_vdes, 160.000e6, -40, "VDES-TER OFDM ~25 kHz (ITU-R M.2092)", PERMANENT_ARB, "Custom OFDM ARB [P] - trama ETSI EN 303 706 real -> encoder externo; BBWV:WAV \"vdes.wv\""),
     "dmr": CatalogEntry(gen_4fsk, 466.000e6, -40, "DMR 4FSK", PERMANENT_ARB, "Custom 4FSK / ARB [P] - vocoder real -> ARB externo"),
     "p25": CatalogEntry(gen_4fsk, 460.000e6, -40, "P25 C4FM", PERMANENT_ARB, "Custom 4FSK / ARB [P]"),
     "tetra": CatalogEntry(gen_pi4_dqpsk, 392.000e6, -40, "TETRA pi/4-DQPSK", PERMANENT_ARB, "Custom pi/4-DQPSK / ARB [P]"),
@@ -579,6 +582,7 @@ CATALOG: dict[str, CatalogEntry] = {
     "satcom_x": CatalogEntry(gen_psk, 8100.000e6, -40, "X-band satcom QPSK", PERMANENT_ARB, "Custom / ARB [P]"),
     "radar_x": CatalogEntry(gen_lfm_pulse, 9400.000e6, -20, "X-band radar LFM", PERMANENT_ARB, "Pulse Sequencer K300/K301 [P] (nativo); B1044N BW I/Q a verificar; ARB LFM [P]"),
     "ku_dl": CatalogEntry(gen_apsk16, 12200.000e6, -40, "Ku downlink 16APSK", PERMANENT_ARB, "16APSK modulacion; BBFRAME/FEC DVB -> export ARB [P]"),
+    "starlink_ku": CatalogEntry(gen_starlink_ku, 14250.000e6, -40, "Starlink Ku-band uplink OFDM ~250 MHz", PERMANENT_ARB, "Custom wideband OFDM ARB [P] - encoder propietario SpaceX; BBWV:WAV \"starlink_ku.wv\""),
     "ka_dl": CatalogEntry(gen_apsk16, 19500.000e6, -40, "Ka downlink 16APSK", PERMANENT_ARB, "16APSK modulacion; BBFRAME/FEC DVB -> export ARB [P]"),
     "ka_ul": CatalogEntry(gen_apsk16, 29500.000e6, -40, "Ka uplink 16APSK", PERMANENT_ARB, "16APSK modulacion; BBFRAME/FEC DVB -> export ARB [P]"),
 }

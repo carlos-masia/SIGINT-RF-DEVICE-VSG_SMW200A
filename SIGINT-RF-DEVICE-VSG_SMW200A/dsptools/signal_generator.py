@@ -188,3 +188,84 @@ def gen_awgn(fs: float = 4e6, dur: float = 2e-3, seed: int = 9) -> tuple[Any, fl
     n = int(fs * dur)
     rng = np.random.default_rng(seed)
     return normalize(rng.normal(size=n) + 1j * rng.normal(size=n)), fs
+
+
+# ---------------------------------------------------------------------------
+# Maritime digital (VDES)
+# ---------------------------------------------------------------------------
+
+def gen_vdes(
+    fs: float = 100e3,
+    n_fft: int = 256,
+    n_cp: int = 32,
+    n_active: int = 64,
+    nsym: int = 64,
+    seed: int = 11,
+) -> tuple[Any, float]:
+    """
+    OFDM placeholder for VDES-TER (VHF Data Exchange System, ITU-R M.2092).
+
+    Occupied bandwidth ≈ n_active × fs / n_fft ≈ 25 kHz with defaults.
+    QPSK subcarriers, cyclic-prefix OFDM representative of VDE-TER structure.
+    For a standards-compliant waveform use an ETSI EN 303 706 encoder.
+
+    Default SCPI mapping:
+        FREQ 160e6  |  LEVEL -40  |  BBWV:WAV "vdes.wv"  |  BBWV:STAT ON  |  OUTP ON
+    """
+    rng = np.random.default_rng(seed)
+    half = n_active // 2
+    frame: list[np.ndarray] = []
+    for _ in range(nsym):
+        bits = rng.integers(0, 4, n_active)
+        qpsk = np.exp(1j * (np.pi / 4 + np.pi / 2 * bits))
+        freq_bins = np.zeros(n_fft, dtype=complex)
+        # Symmetric placement around DC (skip DC bin)
+        freq_bins[1 : half + 1] = qpsk[:half]
+        freq_bins[n_fft - half : n_fft] = qpsk[half:]
+        sym = np.fft.ifft(freq_bins) * np.sqrt(n_fft)
+        frame.append(np.concatenate([sym[-n_cp:], sym]))
+    iq = np.concatenate(frame)
+    return normalize(iq), fs
+
+
+# ---------------------------------------------------------------------------
+# Satellite wideband (Starlink Ku-band)
+# ---------------------------------------------------------------------------
+
+def gen_starlink_ku(
+    fs: float = 500e6,
+    n_fft: int = 1024,
+    n_cp: int = 72,
+    n_active: int = 512,
+    qam_order: int = 16,
+    nsym: int = 14,
+    seed: int = 12,
+) -> tuple[Any, float]:
+    """
+    Wideband OFDM placeholder for Starlink Ku-band uplink (14.0–14.5 GHz).
+
+    Occupied bandwidth ≈ n_active × fs / n_fft ≈ 250 MHz with defaults.
+    16-QAM subcarriers, cyclic-prefix OFDM representative of a high-throughput
+    satellite waveform. For a standards-compliant waveform use a proper DVB-S2X
+    or proprietary encoder.
+
+    Default SCPI mapping:
+        FREQ 14250e6  |  LEVEL -40  |  BBWV:WAV "starlink_ku.wv"  |  BBWV:STAT ON  |  OUTP ON
+    """
+    rng = np.random.default_rng(seed)
+    k = int(round(qam_order ** 0.5))
+    lvl = np.arange(-(k - 1), k, 2).astype(float)
+    norm_scale = np.sqrt(np.mean(lvl ** 2) * 2)
+    half = n_active // 2
+    frame: list[np.ndarray] = []
+    for _ in range(nsym):
+        i_syms = rng.choice(lvl, n_active)
+        q_syms = rng.choice(lvl, n_active)
+        qam_syms = (i_syms + 1j * q_syms) / norm_scale
+        freq_bins = np.zeros(n_fft, dtype=complex)
+        freq_bins[1 : half + 1] = qam_syms[:half]
+        freq_bins[n_fft - half : n_fft] = qam_syms[half:]
+        sym = np.fft.ifft(freq_bins) * np.sqrt(n_fft)
+        frame.append(np.concatenate([sym[-n_cp:], sym]))
+    iq = np.concatenate(frame)
+    return normalize(iq), fs
