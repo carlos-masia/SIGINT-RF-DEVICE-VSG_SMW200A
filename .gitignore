@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+SIGINT-RF-DEVICE-VSG_SMW200A/generate_arb_file/output/arb_signals.wv

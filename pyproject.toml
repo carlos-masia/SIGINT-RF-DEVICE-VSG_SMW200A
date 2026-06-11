@@ -9,14 +9,14 @@ package-mode = false
 
 [project]
 name = "SIGINT-RF-DEVICE-VSG_SMW200A"
-version = "0.1.2"
+version = "0.1.3"
 description = "R&S SMW200A ARB catalog (RsSmw), VSG driver (vsg_smw200a), SCPI/TCP helpers (rs_scpi_tcp), Tk tools (rs_smw_fsw_tcp, vsg_tk_smoke)."
-requires-python = ">=3.14.5"
+requires-python = ">=3.12.0"
 readme = "README.md"
 license = { text = "MIT" }
 keywords = ["smw200a", "vsg", "scpi", "rohde-schwarz", "sigint", "arb"]
 classifiers = [
-    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.12",
     "Private :: Do Not Upload",
 ]
 
@@ -25,11 +25,12 @@ classifiers = [
 dependencies = [
     "numpy==2.4.6",
     "RsSmw==5.50.42",
-    "PyYAML==6.0.1",
+    "matplotlib==3.9",
 ]
 
 [project.scripts]
-sigint-rf-vsg-tk = "vsg_tk_smoke:main"
+sigint-rf-vsg-tk      = "vsg_tk_smoke:main"
+sigint-rf-gen-arb     = "generate_arb_file.__main__:_cli"
 
 [project.optional-dependencies]
 dev = [
@@ -41,8 +42,8 @@ dev = [
 ]
 
 [tool.setuptools]
-# rs_scpi_tcp and dsptools are packages (subfolders with __init__.py); the rest remain flat modules.
-packages = ["rs_scpi_tcp", "dsptools"]
+# rs_scpi_tcp, dsptools and generate_arb_file are packages (subfolders with __init__.py).
+packages = ["rs_scpi_tcp", "dsptools", "generate_arb_file"]
 py-modules = [
     "rs_smw_fsw_tcp",
     "vsg_smw200a",
@@ -54,14 +55,14 @@ py-modules = [
 
 [tool.black]
 line-length = 100
-target-version = ["py314"]
+target-version = ["py312"]
 [tool.ruff]
 line-length = 100
-target-version = "py314"
+target-version = "py312"
 select = ["E", "F", "W"]
 ignore = ["E501"]
 
 [tool.mypy]
-python_version = "3.14"
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true

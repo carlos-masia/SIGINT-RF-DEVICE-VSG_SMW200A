@@ -46,6 +46,22 @@ if _VSG_YAML.is_file() and not os.environ.get("VSG_CONFIG_PATH", "").strip():
     os.environ["VSG_CONFIG_PATH"] = str(_VSG_YAML)
 
 # ---------------------------------------------------------------------------
+# Optional: ArbFileGenerator for persistent .wv output + spectrum preview
+# ---------------------------------------------------------------------------
+try:
+    from generate_arb_file.generate_arb_file import ArbFileGenerator
+    _HAVE_ARB_GEN = True
+except Exception:  # noqa: BLE001
+    _HAVE_ARB_GEN = False
+
+try:
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    import matplotlib.figure as _mpl_fig
+    _HAVE_MPL = True
+except Exception:  # noqa: BLE001
+    _HAVE_MPL = False
+
+# ---------------------------------------------------------------------------
 # All catalog / ARB logic imported from the device package
 # ---------------------------------------------------------------------------
 from vsg_smw200a import (
@@ -143,7 +159,7 @@ class ArbSignalsGuiApp:
         if keys:
             self.combo_signal.current(0)
         self.combo_signal.grid(row=0, column=1, sticky="w", padx=(4, 0))
-        self.combo_signal.bind("<<ComboboxSelected>>", lambda _e: self._rebuild_param_panel())
+        self.combo_signal.bind("<<ComboboxSelected>>", lambda _e: self._on_signal_selected())
         self.var_dry = tk.BooleanVar(value=False)
         ttk.Checkbutton(opt, text="Dry-run (.wv only, no upload / no RF)", variable=self.var_dry).grid(
             row=0, column=2, padx=(12, 0)
@@ -192,11 +208,76 @@ class ArbSignalsGuiApp:
         mainf.rowconfigure(r, weight=1)
         self._append_log("Select a signal, edit waveform parameters if needed, then Generate.")
 
+        # ------------------------------------------------------------------
+        # Spectrum preview panel (matplotlib embedded, optional)
+        # ------------------------------------------------------------------
+        self._spectrum_ax = None
+        self._spectrum_canvas = None
+        self._spectrum_fig = None
+        if _HAVE_MPL:
+            r += 1
+            spec_lf = ttk.LabelFrame(mainf, text="Spectrum preview (baseband I/Q)", padding=4)
+            spec_lf.grid(row=r, column=0, sticky="nsew", pady=(6, 0))
+            mainf.rowconfigure(r, weight=2)
+            self._spectrum_fig = _mpl_fig.Figure(figsize=(9, 3.2), dpi=90, tight_layout=True)
+            self._spectrum_ax = self._spectrum_fig.add_subplot(111)
+            self._spectrum_ax.set_ylabel("Power (dBr)")
+            self._spectrum_ax.text(
+                0.5, 0.5, "Select a signal to preview its baseband spectrum",
+                transform=self._spectrum_ax.transAxes,
+                ha="center", va="center", color="gray", fontsize=10,
+            )
+            self._spectrum_ax.grid(True, alpha=0.3)
+            self._spectrum_canvas = FigureCanvasTkAgg(self._spectrum_fig, master=spec_lf)
+            self._spectrum_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            self._spectrum_canvas.draw()
+
         self._rebuild_param_panel()
 
     def _append_log(self, msg: str) -> None:
         self.txt.insert(tk.END, msg + "\n")
         self.txt.see(tk.END)
+
+    def _on_signal_selected(self) -> None:
+        self._rebuild_param_panel()
+        name = self.combo_signal.get().strip()
+        if name and _HAVE_ARB_GEN and _HAVE_MPL:
+            threading.Thread(target=self._refresh_spectrum, args=(name,), daemon=True).start()
+
+    def _refresh_spectrum(self, signal_name: str) -> None:
+        """Background thread: compute spectrum and update canvas in main thread."""
+        try:
+            gen = ArbFileGenerator(signal_name)
+            data = gen.preview()
+            if data:
+                freqs, power_db, xlabel, title = data
+                self.root.after(
+                    0,
+                    lambda f=freqs, p=power_db, x=xlabel, t=title:
+                        self._update_spectrum_canvas(f, p, x, t),
+                )
+        except Exception as exc:  # noqa: BLE001
+            self._gui_log(f"[spectrum] {exc}")
+
+    def _update_spectrum_canvas(
+        self,
+        freqs,
+        power_db,
+        xlabel: str,
+        title: str,
+    ) -> None:
+        """Main-thread: redraw the embedded matplotlib spectrum canvas."""
+        if self._spectrum_ax is None or self._spectrum_canvas is None:
+            return
+        self._spectrum_ax.clear()
+        self._spectrum_ax.plot(freqs, power_db, linewidth=0.8, color="#1f77b4")
+        self._spectrum_ax.set_xlabel(xlabel)
+        self._spectrum_ax.set_ylabel("Power (dBr)")
+        self._spectrum_ax.set_title(title, fontsize=8)
+        self._spectrum_ax.set_ylim(-80, 5)
+        self._spectrum_ax.grid(True, alpha=0.3)
+        self._spectrum_fig.tight_layout()
+        self._spectrum_canvas.draw()
 
     def _rebuild_param_panel(self) -> None:
         for w in self.params_inner.winfo_children():
@@ -290,6 +371,25 @@ class ArbSignalsGuiApp:
         power_dbm = rf_dbm
 
         def work() -> None:
+            # 1. Generate persistent .wv + PNG preview in ./output/
+            if _HAVE_ARB_GEN:
+                try:
+                    gen = ArbFileGenerator(name)
+                    wv_path, png_path = gen.generate()
+                    self._gui_log(f"Saved: {wv_path}")
+                    if png_path:
+                        self._gui_log(f"Preview: {png_path}")
+                    if gen.spectrum_data and _HAVE_MPL:
+                        freqs, power_db, xlabel, title = gen.spectrum_data
+                        self.root.after(
+                            0,
+                            lambda f=freqs, p=power_db, x=xlabel, t=title:
+                                self._update_spectrum_canvas(f, p, x, t),
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    self._gui_log(f"[generate] {exc}")
+
+            # 2. Upload, arm ARB and configure instrument via play()
             play(
                 name,
                 dry_run=bool(self.var_dry.get()),
