@@ -123,6 +123,19 @@ def gen_apsk16(fs: float = 4e6, rs: float = 500e3, nsym: int = 1024, beta: float
     return normalize(shape_symbols(syms, sps, beta)), fs
 
 
+def gen_apsk32(fs: float = 4e6, rs: float = 500e3, nsym: int = 1024, beta: float = 0.2, seed: int = 13) -> tuple[Any, float]:
+    """32-APSK with RRC shaping (DVB-S2/S2X VSAT Ku-band). Rings 4+12+16, γ1=2.84, γ2=5.27."""
+    sps = int(round(fs / rs))
+    r1, r2, r3 = 1.0, 2.84, 5.27
+    inner  = r1 * np.exp(1j * (np.pi / 4 + np.pi / 2 * np.arange(4)))
+    middle = r2 * np.exp(1j * (np.pi / 12 * (2 * np.arange(12))))
+    outer  = r3 * np.exp(1j * (np.pi / 8 * np.arange(16)))
+    const = np.concatenate([inner, middle, outer])
+    idx = np.random.default_rng(seed).integers(0, 32, nsym)
+    syms = const[idx]
+    return normalize(shape_symbols(syms, sps, beta)), fs
+
+
 # ---------------------------------------------------------------------------
 # Radar / pulsed
 # ---------------------------------------------------------------------------
